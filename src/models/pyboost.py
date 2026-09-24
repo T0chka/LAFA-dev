@@ -33,8 +33,7 @@ class PyBoostConfig:
     min_data_in_leaf: int = 5
     use_hess: bool = True
     sketch_method: str | None = "proj"
-    sketch_outputs: int = 1
-    sketch_size: int = 64
+    sketch_size: int = 1
     max_bin: int = 256
     seed: int = 222
     n_splits: int = 5
@@ -117,51 +116,74 @@ class PyBoostModel:
             print(f"\n[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits}")
             train_idx = np.where(folds != fold_id)[0]
             valid_idx = np.where(folds == fold_id)[0]
-
-            x_train, x_valid, norm_params = normalize_train_valid(
-                features, train_idx, valid_idx, method=self.config.normalization
-            )
-
-            y_train = targets_dense[train_idx]
             y_valid = targets_dense[valid_idx]
 
-            # Train PyBoost model
+            model_path = models_dir / f"fold_{fold_id:02d}.pkl.gz"
+            norm_path = models_dir / f"fold_{fold_id:02d}_norm.npz"
 
-            alpha = float(self.config.term_neg_weight_alpha)
-            neg_weight_cp = None
-            if alpha > 0.0:
-                w = self._term_neg_weights_from_targets(targets[train_idx], alpha=alpha)
-                neg_weight_cp = cp.asarray(w, dtype=cp.float32)
+            if model_path.exists() and norm_path.exists():
+                with np.load(norm_path) as norm:
+                    method = str(norm["method"].item())
+                    norm_params = {k: norm[k] for k in norm.files if k != "method"}
+                x_valid = apply_normalize_test(
+                    features[valid_idx], norm_params, method=method
+                )
+                with gzip.open(model_path, "rb") as f:
+                    model = pickle.load(f)
+                print(f"[{log_prefix}] {context} | fold={fold_id}/{self.config.n_splits} resume: loaded saved model")
+            else:
+                x_train, x_valid, norm_params = normalize_train_valid(
+                    features, train_idx, valid_idx, method=self.config.normalization
+                )
+                y_train = targets_dense[train_idx]
 
-            loss = BCEWithNegWeightsLoss(neg_weight=neg_weight_cp)
+                alpha = float(self.config.term_neg_weight_alpha)
+                neg_weight_cp = None
+                if alpha > 0.0:
+                    w = self._term_neg_weights_from_targets(targets[train_idx], alpha=alpha)
+                    neg_weight_cp = cp.asarray(w, dtype=cp.float32)
 
-            model = SketchBoost(
-                loss=loss,
-                ntrees=self.config.ntrees,
-                lr=self.config.lr,
-                es=self.config.es,
-                lambda_l2=self.config.lambda_l2,
-                gd_steps=self.config.gd_steps,
-                subsample=self.config.subsample,
-                colsample=self.config.colsample,
-                min_data_in_leaf=self.config.min_data_in_leaf,
-                use_hess=self.config.use_hess,
-                sketch_method=self.config.sketch_method,
-                sketch_outputs=self.config.sketch_outputs,
-                max_bin=self.config.max_bin,
-                max_depth=self.config.max_depth,
-                verbose=self.config.verbose,
-            )
+                loss = BCEWithNegWeightsLoss(neg_weight=neg_weight_cp)
 
-            model.fit(
-                x_train,
-                y_train,
-                eval_sets=[{"X": x_valid, "y": y_valid}],
-            )
+                model = SketchBoost(
+                    loss=loss,
+                    ntrees=self.config.ntrees,
+                    lr=self.config.lr,
+                    es=self.config.es,
+                    lambda_l2=self.config.lambda_l2,
+                    gd_steps=self.config.gd_steps,
+                    subsample=self.config.subsample,
+                    colsample=self.config.colsample,
+                    min_data_in_leaf=self.config.min_data_in_leaf,
+                    use_hess=self.config.use_hess,
+                    sketch_method=self.config.sketch_method,
+                    sketch_outputs=self.config.sketch_size,
+                    max_bin=self.config.max_bin,
+                    max_depth=self.config.max_depth,
+                    verbose=self.config.verbose,
+                )
+
+                model.fit(
+                    x_train,
+                    y_train,
+                    eval_sets=[{"X": x_valid, "y": y_valid}],
+                )
+
+                with gzip.open(model_path, "wb", compresslevel=6) as f:
+                    pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+                print(f"[{log_prefix}] wrote: {model_path}")
+
+                norm_dict = {"method": self.config.normalization}
+                for key, value in norm_params.items():
+                    if isinstance(value, np.ndarray):
+                        norm_dict[key] = value.astype(np.float32, copy=False)
+                    else:
+                        norm_dict[key] = value
+                np.savez_compressed(norm_path, **norm_dict)
+                print(f"[{log_prefix}] wrote: {norm_path}")
 
             probs = model.predict(x_valid)
             logits = self._probs_to_logits(probs)
-
             val_loss = self._bce_loss(y_valid, logits)
 
             # Calculate ROC AUC and Average Precision for multilabel classification (optional)
@@ -185,24 +207,6 @@ class PyBoostModel:
             oof_logits[valid_idx] = logits
 
             fold_val_loss.append(float(val_loss))
-
-            # Save model and normalization (compressed with gzip)
-            model_path = models_dir / f"fold_{fold_id:02d}.pkl.gz"
-            with gzip.open(model_path, "wb", compresslevel=6) as f:
-                pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
-            print(f"[{log_prefix}] wrote: {model_path}")
-
-            # Save normalization parameters (method-specific)
-            norm_dict = {"method": self.config.normalization}
-            for key, value in norm_params.items():
-                if isinstance(value, np.ndarray):
-                    norm_dict[key] = value.astype(np.float32, copy=False)
-                else:
-                    norm_dict[key] = value
-            norm_path = models_dir / f"fold_{fold_id:02d}_norm.npz"
-            np.savez_compressed(norm_path, **norm_dict)
-            print(f"[{log_prefix}] wrote: {norm_path}")
-
 
             # Free GPU memory after each fold
             del model, probs, logits
