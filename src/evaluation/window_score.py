@@ -269,7 +269,6 @@ def score_window(
             "f_micro",
         ],
     )
-    long.to_csv(output_dir / "scores_long.tsv", sep="\t", index=False, float_format="%.6f")
 
     wide = long.pivot(index="method", columns=["regime", "aspect"], values="f_micro")
     wide = wide.reindex(index=METHODS, columns=pd.MultiIndex.from_product([REGIMES, ASPECTS]))
@@ -289,7 +288,6 @@ def score_window(
 
     print_separator(log_prefix, "F-micro results")
     print(wide.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
-    print(f"[{log_prefix}] wrote: {output_dir / 'scores_long.tsv'}")
     print(f"[{log_prefix}] wrote: {output_dir / 'scores.tsv'}")
     print(f"[{log_prefix}] wrote: {output_dir / 'thresholds.tsv'}")
     return long, wide

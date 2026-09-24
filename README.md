@@ -150,7 +150,6 @@ uv run python -m scripts.score_eval --groundtruth-dir "$HOME/data/lafa/evaluatio
 The scorer consumes the official `democafa` NK/LK/PK files directly, restricts scoring to `groundtruth_terms_of_interest.txt`, and uses the source snapshot IA weights. Test predictions already exclude source-known terms during model postprocessing, so the local scorer evaluates the supplied ground-truth rows directly. It writes:
 
 ```text
-scores_long.tsv
 scores.tsv
 thresholds.tsv
 ```
